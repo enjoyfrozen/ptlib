@@ -132,7 +132,10 @@ static void SetPossibleDate(struct Variables*, time_t, time_t, time_t);
 
 %}
 
-%pure_parser
+%define api.pure full
+%parse-param { int parseParam }  
+
+
 
 %union {
     time_t		Number;
