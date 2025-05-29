@@ -247,6 +247,11 @@ class PVideoFrameInfo : public PObject
     static PStringArray GetSizeNames();
 
   protected:
+    unsigned   srcFrameWidth;
+    unsigned   srcFrameHeight;
+    PString    srcColourFormat;
+
+      
     unsigned   frameWidth;
     unsigned   frameHeight;
     unsigned   sarWidth;

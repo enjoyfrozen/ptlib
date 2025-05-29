@@ -354,6 +354,42 @@ class PColourConverter : public PObject
 };
 
 
+class YUVResize
+{
+public:
+    YUVResize() {
+        m_resize_buffer = NULL;
+        m_resize_buffer_size = 0;
+    }
+
+    ~YUVResize() {
+        if (m_resize_buffer) {
+            delete[]m_resize_buffer;
+            m_resize_buffer = NULL;
+        }
+    }
+
+    static YUVResize* instance();
+
+    void yuy2_to_yv12_bicubic(const uint8_t* yuy2, int src_w, int src_h,
+        uint8_t* yv12, int dst_w, int dst_h);
+    void yuy2_to_yv12_bilinear(const unsigned char* yuy2, int src_w, int src_h,
+        unsigned char* yv12, int dst_w, int dst_h);
+    void yuy2_to_yv12_resize(const unsigned char* yuy2, int src_width, int src_height,
+        unsigned char* yv12, int dst_width, int dst_height);
+    void reallocResizeBuffer(int requireSize);
+
+    int yuyv_to_yuv420p(
+        unsigned char* out,
+        const unsigned char* in,
+        unsigned int width,
+        unsigned int height);
+
+protected:
+    unsigned char* m_resize_buffer;
+    int m_resize_buffer_size;
+};
+
 /**Declare a colour converter class with Convert() function.
    This should only be used once and at the global scope level for each
    converter. It declares everything needs so only the body of the Convert()

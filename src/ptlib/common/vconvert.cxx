@@ -2874,6 +2874,331 @@ PSTANDARD_COLOUR_CONVERTER(JPEG,YUV420P)
 #pragma warning(default : 4244)
 #endif
 
+
+
+
+//YUY2: [Y0 U0 Y1 V0][Y2 U2 Y3 V2]  
+//YV12:  YYYYYYYY UU VV
+static YUVResize g_YUVResize;
+YUVResize* YUVResize::instance()
+{
+    return &g_YUVResize;
+}
+
+
+void YUVResize::reallocResizeBuffer(int requireSize)
+{
+    if (requireSize < 0) {
+        printf("bad resize buffer size %d\n", requireSize);
+        return;
+    }
+    if (requireSize > m_resize_buffer_size) {
+        if (m_resize_buffer)
+            delete[]m_resize_buffer;
+        m_resize_buffer = new unsigned char[requireSize];
+        m_resize_buffer_size = requireSize;
+    }
+    memset(m_resize_buffer, 0, requireSize);
+
+}
+
+
+void YUVResize::yuy2_to_yv12_resize(const unsigned char* yuy2, int src_width, int src_height,
+    unsigned char* yv12, int dst_width, int dst_height)
+{
+    reallocResizeBuffer(src_width * src_height * 3);
+    unsigned char* temp_y = (unsigned char*)m_resize_buffer;
+    unsigned char* temp_u = temp_y + src_width * src_height;
+    unsigned char* temp_v = temp_u + src_width * src_height;
+
+    // Separate YUY2 components
+    for (int y = 0; y < src_height; y++) {
+        for (int x = 0; x < src_width; x += 2) {
+            int idx = y * src_width * 2 + x * 2;
+            temp_y[y * src_width + x] = yuy2[idx];
+            temp_y[y * src_width + x + 1] = yuy2[idx + 2];
+
+            if (y % 2 == 0 && x % 2 == 0) {
+                int uv_idx = (y / 2) * (src_width / 2) + (x / 2);
+                temp_u[uv_idx] = yuy2[idx + 1];
+                temp_v[uv_idx] = yuy2[idx + 3];
+            }
+        }
+    }
+
+    // Simple linear scaling of the Y component
+    for (int y = 0; y < dst_height; y++) {
+        for (int x = 0; x < dst_width; x++) {
+            int src_x = x * src_width / dst_width;
+            int src_y = y * src_height / dst_height;
+            yv12[y * dst_width + x] = temp_y[src_y * src_width + src_x];
+        }
+    }
+
+    // Simple linear scaling of UV components
+    int y_size = dst_width * dst_height;
+    int uv_width = dst_width / 2;
+    int uv_height = dst_height / 2;
+
+    for (int y = 0; y < uv_height; y++) {
+        for (int x = 0; x < uv_width; x++) {
+            int src_x = x * (src_width / 2) / uv_width;
+            int src_y = y * (src_height / 2) / uv_height;
+            yv12[y_size + y * uv_width + x] = temp_u[src_y * (src_width / 2) + src_x];
+            yv12[y_size + uv_width * uv_height + y * uv_width + x] = temp_v[src_y * (src_width / 2) + src_x];
+        }
+    }
+
+}
+
+
+// Bilinear interpolation function
+static unsigned char bilinear_interpolate(unsigned char a, unsigned char b,
+    unsigned char c, unsigned char d,
+    float dx, float dy) {
+    float value = a * (1 - dx) * (1 - dy) +
+        b * dx * (1 - dy) +
+        c * (1 - dx) * dy +
+        d * dx * dy;
+    return (unsigned char)(value + 0.5f);
+}
+
+void YUVResize::yuy2_to_yv12_bilinear(const unsigned char* yuy2, int src_w, int src_h,
+    uint8_t* yv12, int dst_w, int dst_h)
+{
+    reallocResizeBuffer(src_w * src_h * 3);
+    unsigned char* temp_y = (unsigned char*)m_resize_buffer;
+    unsigned char* temp_u = temp_y + src_w * src_h;
+    unsigned char* temp_v = temp_u + src_w * src_h;
+
+    //unsigned char* temp_y =(unsigned char*) malloc(src_w * src_h);
+    //unsigned char* temp_u = (unsigned char*)malloc((src_w / 2) * (src_h / 2));
+    //unsigned char* temp_v = (unsigned char*)malloc((src_w / 2) * (src_h / 2));
+
+    // 1. Separate YUY2 components
+    for (int y = 0; y < src_h; y++) {
+        for (int x = 0; x < src_w; x += 2) {
+            int idx = y * src_w * 2 + x * 2;
+            temp_y[y * src_w + x] = yuy2[idx];
+            temp_y[y * src_w + x + 1] = yuy2[idx + 2];
+
+            if (y % 2 == 0 && x % 2 == 0) {
+                int uv_idx = (y / 2) * (src_w / 2) + (x / 2);
+                temp_u[uv_idx] = yuy2[idx + 1];
+                temp_v[uv_idx] = yuy2[idx + 3];
+            }
+        }
+    }
+
+    // 2. Bilinear scaling of the Y component
+    float scale_x = (float)src_w / dst_w;
+    float scale_y = (float)src_h / dst_h;
+
+    for (int y = 0; y < dst_h; y++) {
+        for (int x = 0; x < dst_w; x++) {
+            float src_x = x * scale_x;
+            float src_y = y * scale_y;
+
+            int x0 = (int)src_x;
+            int y0 = (int)src_y;
+            int x1 = x0 + 1 < src_w ? x0 + 1 : x0;
+            int y1 = y0 + 1 < src_h ? y0 + 1 : y0;
+
+            float dx = src_x - x0;
+            float dy = src_y - y0;
+
+            unsigned char a = temp_y[y0 * src_w + x0];
+            unsigned char b = temp_y[y0 * src_w + x1];
+            unsigned char c = temp_y[y1 * src_w + x0];
+            unsigned char d = temp_y[y1 * src_w + x1];
+
+            yv12[y * dst_w + x] = bilinear_interpolate(a, b, c, d, dx, dy);
+        }
+    }
+
+    // 3. Bilinear scaling of UV components
+    int y_size = dst_w * dst_h;
+    int uv_w = dst_w / 2;
+    int uv_h = dst_h / 2;
+    float uv_scale_x = (float)(src_w / 2) / uv_w;
+    float uv_scale_y = (float)(src_h / 2) / uv_h;
+
+    for (int y = 0; y < uv_h; y++) {
+        for (int x = 0; x < uv_w; x++) {
+            float src_x = x * uv_scale_x;
+            float src_y = y * uv_scale_y;
+
+            int x0 = (int)src_x;
+            int y0 = (int)src_y;
+            int x1 = x0 + 1 < (src_w / 2) ? x0 + 1 : x0;
+            int y1 = y0 + 1 < (src_h / 2) ? y0 + 1 : y0;
+
+            float dx = src_x - x0;
+            float dy = src_y - y0;
+
+            //U component interpolation
+            unsigned char ua = temp_u[y0 * (src_w / 2) + x0];
+            unsigned char ub = temp_u[y0 * (src_w / 2) + x1];
+            unsigned char uc = temp_u[y1 * (src_w / 2) + x0];
+            unsigned char ud = temp_u[y1 * (src_w / 2) + x1];
+            yv12[y_size + y * uv_w + x] = bilinear_interpolate(ua, ub, uc, ud, dx, dy);
+
+            //V component interpolation
+            unsigned char va = temp_v[y0 * (src_w / 2) + x0];
+            unsigned char vb = temp_v[y0 * (src_w / 2) + x1];
+            unsigned char vc = temp_v[y1 * (src_w / 2) + x0];
+            unsigned char vd = temp_v[y1 * (src_w / 2) + x1];
+            yv12[y_size + uv_w * uv_h + y * uv_w + x] = bilinear_interpolate(va, vb, vc, vd, dx, dy);
+        }
+    }
+
+}
+
+
+
+// Bicubic interpolation coefficient calculation
+static float cubic_weight(float x) {
+    float a = -0.5f;
+    x = fabs(x);
+    if (x < 1.0f) {
+        return (a + 2.0f) * x * x * x - (a + 3.0f) * x * x + 1.0f;
+    }
+    else if (x < 2.0f) {
+        return a * x * x * x - 5.0f * a * x * x + 8.0f * a * x - 4.0f * a;
+    }
+    return 0.0f;
+}
+
+// Bicubic interpolation core function
+static uint8_t bicubic_interp(const uint8_t* src, int stride,
+    float x, float y, int width, int height) {
+    int x0 = (int)x - 1;
+    int y0 = (int)y - 1;
+    float sum = 0.0f;
+    float weight_sum = 0.0f;
+
+    for (int j = 0; j < 4; j++) {
+        int y_pos = y0 + j;
+        if (y_pos < 0) y_pos = 0;
+        if (y_pos >= height) y_pos = height - 1;
+
+        for (int i = 0; i < 4; i++) {
+            int x_pos = x0 + i;
+            if (x_pos < 0) x_pos = 0;
+            if (x_pos >= width) x_pos = width - 1;
+
+            float wx = cubic_weight(x - x_pos);
+            float wy = cubic_weight(y - y_pos);
+            float weight = wx * wy;
+
+            sum += src[y_pos * stride + x_pos] * weight;
+            weight_sum += weight;
+        }
+    }
+
+    return (uint8_t)(sum / weight_sum + 0.5f);
+}
+
+void YUVResize::yuy2_to_yv12_bicubic(const uint8_t* yuy2, int src_w, int src_h,
+    uint8_t* yv12, int dst_w, int dst_h)
+{
+    reallocResizeBuffer(src_w * src_h * 3);
+    unsigned char* temp_y = (unsigned char*)m_resize_buffer;
+    unsigned char* temp_u = temp_y + src_w * src_h;
+    unsigned char* temp_v = temp_u + src_w * src_h;
+
+    // 1. split YUY2 components
+    for (int y = 0; y < src_h; y++) {
+        for (int x = 0; x < src_w; x += 2) {
+            int idx = y * src_w * 2 + x * 2;
+            temp_y[y * src_w + x] = yuy2[idx];
+            temp_y[y * src_w + x + 1] = yuy2[idx + 2];
+
+            if (y % 2 == 0 && x % 2 == 0) {
+                int uv_idx = (y / 2) * (src_w / 2) + (x / 2);
+                temp_u[uv_idx] = yuy2[idx + 1];
+                temp_v[uv_idx] = yuy2[idx + 3];
+            }
+        }
+    }
+
+    // 2. Y component bicubic scaling
+    float scale_x = (float)(src_w - 1) / (dst_w - 1);
+    float scale_y = (float)(src_h - 1) / (dst_h - 1);
+
+    for (int y = 0; y < dst_h; y++) {
+        for (int x = 0; x < dst_w; x++) {
+            float src_x = x * scale_x;
+            float src_y = y * scale_y;
+            yv12[y * dst_w + x] = bicubic_interp(temp_y, src_w, src_x, src_y, src_w, src_h);
+        }
+    }
+
+    // 3. UV component bicubic scaling
+    int y_size = dst_w * dst_h;
+    int uv_w = dst_w / 2;
+    int uv_h = dst_h / 2;
+    float uv_scale_x = (float)(src_w / 2 - 1) / (uv_w - 1);
+    float uv_scale_y = (float)(src_h / 2 - 1) / (uv_h - 1);
+
+    for (int y = 0; y < uv_h; y++) {
+        for (int x = 0; x < uv_w; x++) {
+            float src_x = x * uv_scale_x;
+            float src_y = y * uv_scale_y;
+
+            // U component interpolation
+            yv12[y_size + y * uv_w + x] =
+                bicubic_interp(temp_u, src_w / 2, src_x, src_y, src_w / 2, src_h / 2);
+
+            //V component interpolation
+            yv12[y_size + uv_w * uv_h + y * uv_w + x] =
+                bicubic_interp(temp_v, src_w / 2, src_x, src_y, src_w / 2, src_h / 2);
+        }
+    }
+}
+
+
+/**
+* @brief Convert YUYV422 data to YUV420P format
+* @param in Input YUYV422 data pointer
+* @param out Output YUV420P buffer
+* @param width Image width (pixels)
+* @param height Image height (pixels)
+* @return Returns 0 on success and -1 on failure
+ */
+int YUVResize::yuyv_to_yuv420p(
+    unsigned char* out,
+    const unsigned char* in,
+    unsigned int width,
+    unsigned int height)
+{
+    if (!in || !out || width == 0 || height == 0) {
+        return -1;
+    }
+
+    unsigned char* y = out;
+    unsigned char* u = out + width * height;
+    unsigned char* v = out + width * height * 5 / 4;
+    unsigned long yuv422_length = 2 * width * height;
+
+    // Extract Y component (full sampling)
+    for (unsigned int i = 0; i < yuv422_length; i += 2) {
+        *y++ = in[i];
+    }
+
+    // Interlaced sampling of UV components (every 4 Ys share 1 set of UV)
+    for (unsigned int i = 0; i < height; i += 2) {
+        unsigned int base_h = i * width * 2;
+        for (unsigned int j = base_h + 1; j < base_h + width * 2; j += 4) {
+            *u++ = in[j];     
+            *v++ = in[j + 2]; 
+        }
+    }
+
+    return 0;
+}
+
+
 #endif
 
 // End Of File ///////////////////////////////////////////////////////////////

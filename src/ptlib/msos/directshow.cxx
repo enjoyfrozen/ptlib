@@ -1,4 +1,4 @@
-/*
+﻿/*
  * directshow.cxx
  *
  * DirectShow Implementation for the H323Plus/OPAL Project.
@@ -251,6 +251,8 @@ class PVideoInputDevice_DirectShow : public PVideoInputDevice
     CComPtr<IBaseFilter>           m_pNullRenderer;
     CComPtr<IMediaControl>         m_pMediaControl;
 
+    PINDEX     m_srcMaxFrameBytes;
+
     PINDEX     m_maxFrameBytes;
     PBYTEArray m_tempFrame;
     PMutex     m_lastFrameMutex;
@@ -459,7 +461,7 @@ class PVideoFrameInfoArray : public std::vector<PVideoFrameInfo*>
 // Input device
 
 PVideoInputDevice_DirectShow::PVideoInputDevice_DirectShow()
-  : m_maxFrameBytes(0)
+  : m_maxFrameBytes(0), m_srcMaxFrameBytes(0)
 #ifdef _WIN32_WCE
   , m_pSampleGrabber(NULL)
 #endif
@@ -624,14 +626,15 @@ bool PVideoInputDevice_DirectShow::SetPinFormat(unsigned useDefaultColourOrSize)
       CHECK_ERROR_RETURN(pStreamConfig->SetFormat(pMediaFormat));
 
       if (useDefaultColourOrSize >= 1) {
-        colourFormat = GUID2Format(pMediaFormat->subtype);
+        srcColourFormat = GUID2Format(pMediaFormat->subtype);
         if (useDefaultColourOrSize >= 2) {
-          frameWidth = scc.MaxOutputSize.cx;
-          frameHeight = scc.MaxOutputSize.cy;
+          srcFrameWidth = scc.MaxOutputSize.cx;
+          srcFrameHeight = scc.MaxOutputSize.cy;
         }
       }
 
       m_selectedGUID = pMediaFormat->subtype;
+      m_srcMaxFrameBytes = CalculateFrameBytes(srcFrameWidth, srcFrameHeight, srcColourFormat);
       m_maxFrameBytes = CalculateFrameBytes(frameWidth, frameHeight, colourFormat);
 
       if (running)
@@ -1721,12 +1724,20 @@ bool PVideoInputDevice_DirectShow::GetCurrentBufferData(BYTE * data)
   if (PAssertNULL(cb->pBuffer) == NULL)
     return false;
 
-  if (cb->bufferSize <= m_maxFrameBytes) {
+  if (cb->bufferSize <= m_srcMaxFrameBytes) {
     cb->mbuf.Wait();
-    memcpy(data, cb->pBuffer, cb->bufferSize);
+    if (cb->bufferSize == srcFrameWidth * srcFrameHeight * 2) {
+        //zorro: yuy2 convert to yuv420p
+        YUVResize::instance()->yuy2_to_yv12_bicubic(cb->pBuffer, srcFrameWidth, srcFrameHeight,
+            data, frameWidth, frameHeight);
+    }
+    else {
+        //suppose yuv420p
+        memcpy(data, cb->pBuffer, min(cb->bufferSize, frameWidth * frameHeight * 3 / 2));
+    }
     cb->mbuf.Signal();
   } else
-    PTRACE(1, "DShow\tNot copying, since bufferSize is greater than m_maxFrameBytes (" << cb->bufferSize << " > " << m_maxFrameBytes << ")");
+    PTRACE(1, "DShow\tNot copying, since bufferSize is greater than m_srcMaxFrameBytes (" << cb->bufferSize << " > " << m_srcMaxFrameBytes << ")");
 
   return true;
 }

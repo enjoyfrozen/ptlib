@@ -1,4 +1,4 @@
-/*
+﻿/*
  * vfw.cxx
  *
  * Classes to support streaming video input (grabbing) and output.
@@ -37,6 +37,7 @@
 #include <ptlib/vconvert.h>
 #include <ptlib/pluginmgr.h>
 #include <ptclib/delaychan.h>
+#include <math.h>
 
 #if P_VFW_CAPTURE
 
@@ -194,11 +195,14 @@ class PVideoInputDevice_VideoForWindows : public PVideoInputDevice
     LRESULT HandleVideo(LPVIDEOHDR vh);
     PBoolean InitialiseCapture();
 
-    PThread     * captureThread;
+    PThread* captureThread;
     PSyncPoint    threadStarted;
 
     HWND          hCaptureWindow;
     PMutex        operationMutex;
+
+    BITMAPINFOHEADER bitmapInfoHeader;
+    bool             bitmapInfoHeaderInited;
 
     PSyncPoint    frameAvailable;
     bool          useVideoMode;
@@ -384,13 +388,18 @@ PVideoInputDevice_VideoForWindows::PVideoInputDevice_VideoForWindows()
 
   useVideoMode    = false;
   lastFrameData   = NULL;
+
+  bitmapInfoHeaderInited = false;
 }
 
 
 PVideoInputDevice_VideoForWindows::~PVideoInputDevice_VideoForWindows()
 {
-  if(lastFrameData)
-    delete[] lastFrameData;
+    if (lastFrameData) {
+        delete[] lastFrameData;
+        lastFrameData = NULL;
+    }
+
   Close();
 }
 
@@ -705,7 +714,7 @@ PBoolean PVideoInputDevice_VideoForWindows::SetFrameSize(unsigned width, unsigne
 
   PVideoDeviceBitmap bi(hCaptureWindow); 
   PTRACE(5, "PVidInp\tChanging frame size from "
-         << bi->bmiHeader.biWidth << 'x' << bi->bmiHeader.biHeight << " to " << width << 'x' << height);
+         << bi->bmiHeader.biWidth << 'x' << bi->bmiHeader.biHeight << " to " << width << 'x' << height <<" biBitCount "<< bi->bmiHeader.biBitCount<<" biSizeImage " << bi->bmiHeader.biSizeImage);
 
   PINDEX i = 0;
   while (FormatTable[i].colourFormat != NULL && !(colourFormat *= FormatTable[i].colourFormat))
@@ -868,18 +877,48 @@ LRESULT PVideoInputDevice_VideoForWindows::HandleVideo(LPVIDEOHDR vh)
 
     // If the size of the current frame is same as of the old ...
     //    -> ... simply copy the data of the new frame into the buffer ...
-    if(lastFrameSize == vh->dwBytesUsed)
-      memcpy(lastFrameData, vh->lpData, lastFrameSize);
+
+
+    //verify vfw: ffplay -f vfwcap -i 0
+    //zorro: resize from 1920x1080 yuy2 to 352x288 yv12
+    if (!bitmapInfoHeaderInited) {
+        BITMAPINFOHEADER bih = PVideoDeviceBitmap(hCaptureWindow)->bmiHeader;
+        memcpy(&bitmapInfoHeader, &bih, sizeof(bih));
+        bitmapInfoHeaderInited = true;
+    }
+    int src_width = bitmapInfoHeader.biWidth; // 1920;
+    int src_height = bitmapInfoHeader.biHeight; //1080;
+    if ((vh->dwBytesUsed == src_width * src_height * 2) && bitmapInfoHeader.biBitCount==16) {
+        unsigned target_width = 352;
+        unsigned target_height = 288;
+       
+        GetFrameSize(target_width, target_height); //suppose 352x288
+
+        int expect_target_size = target_width * target_height * 3 / 2;
+        if (lastFrameSize != expect_target_size)
+        {
+            if (lastFrameData)
+                delete[] lastFrameData;
+            lastFrameData = new BYTE[lastFrameSize + vh->dwBytesUsed];
+            lastFrameSize = expect_target_size;
+        }
+        YUVResize::instance()->yuy2_to_yv12_bicubic(vh->lpData, src_width, src_height, lastFrameData, target_width, target_height);
+    }
     else {
-      // ... otherwise delete the old buffer ...
-      if (lastFrameSize)
-        delete[] lastFrameData;
+        //original, it must by 352x288 YUV420P
+        if (lastFrameSize == vh->dwBytesUsed)
+            memcpy(lastFrameData, vh->lpData, lastFrameSize);
+        else {
+            // ... otherwise delete the old buffer ...
+            if (lastFrameSize)
+                delete[] lastFrameData;
 
-      // ... and allocate a new one.
-      lastFrameSize = vh->dwBytesUsed;
-      lastFrameData = new BYTE[lastFrameSize];
+            // ... and allocate a new one.
+            lastFrameSize = vh->dwBytesUsed;
+            lastFrameData = new BYTE[lastFrameSize];
 
-      memcpy(lastFrameData, vh->lpData, lastFrameSize);
+            memcpy(lastFrameData, vh->lpData, lastFrameSize);
+        }
     }
 
     lastFrameMutex.Signal();
